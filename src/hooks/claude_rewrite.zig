@@ -109,13 +109,7 @@ pub fn extractCommand(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 /// Returns true if any registered comptime filter's command is a
 /// whitespace-delimited prefix of `command`.
 pub fn hasFilterFor(command: []const u8) bool {
-    for (comptime_filters.spec_names) |name| {
-        if (!std.mem.startsWith(u8, command, name)) continue;
-        if (command.len == name.len) return true;
-        const next = command[name.len];
-        if (next == ' ' or next == '\t') return true;
-    }
-    return false;
+    return comptime_filters.hasFilterForCommand(command);
 }
 
 fn emitRewrite(allocator: std.mem.Allocator, command: []const u8, skip_permissions: bool) !void {
@@ -180,10 +174,14 @@ test "extractCommand fails on missing field" {
 test "hasFilterFor detects known command prefix" {
     try std.testing.expect(hasFilterFor("git status"));
     try std.testing.expect(hasFilterFor("git status -s"));
+    try std.testing.expect(hasFilterFor("/usr/bin/git status -s"));
     try std.testing.expect(hasFilterFor("rg reducer src"));
+    try std.testing.expect(hasFilterFor("/opt/homebrew/bin/rg reducer src"));
     try std.testing.expect(hasFilterFor("jest --runInBand"));
     try std.testing.expect(hasFilterFor("pnpm test"));
     try std.testing.expect(hasFilterFor("mypy src"));
+    try std.testing.expect(hasFilterFor("/bin/ls /tmp"));
+    try std.testing.expect(hasFilterFor("/usr/bin/find . -type f"));
     try std.testing.expect(!hasFilterFor("git statusfoo"));
     try std.testing.expect(!hasFilterFor("unknown_tool"));
 }

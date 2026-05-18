@@ -52,7 +52,13 @@ pub fn run(args: []const []const u8, allocator: std.mem.Allocator) !u8 {
         return 1;
     }
 
-    const script = try buildUpdateScript(allocator, exe_path, latest_tag);
+    const script = buildUpdateScript(allocator, exe_path, latest_tag) catch |err| switch (err) {
+        error.UnsupportedPlatform => {
+            try compat.writeStderr("ztk update has no prebuilt binary for this platform. Install the latest release manually.\n");
+            return 1;
+        },
+        else => return err,
+    };
     defer allocator.free(script);
 
     if (opts.dry_run) {
@@ -101,8 +107,8 @@ fn usage() !void {
     try compat.writeStderr(
         \\usage: ztk update [--check] [--dry-run] [--tag vX.Y.Z]
         \\
-        \\downloads the latest GitHub release source, builds it with Zig,
-        \\and installs it over the current non-Homebrew ztk executable.
+        \\downloads the latest prebuilt GitHub release binary and installs it
+        \\over the current non-Homebrew ztk executable.
         \\
     );
 }
@@ -156,31 +162,54 @@ fn isHomebrewManagedPath(path: []const u8) bool {
 }
 
 fn buildUpdateScript(allocator: std.mem.Allocator, target_path: []const u8, tag: []const u8) ![]const u8 {
-    const version_dir = if (std.mem.startsWith(u8, tag, "v")) tag[1..] else tag;
+    const asset = releaseAssetName() orelse return error.UnsupportedPlatform;
+    return buildUpdateScriptForAsset(allocator, target_path, tag, asset);
+}
+
+fn buildUpdateScriptForAsset(
+    allocator: std.mem.Allocator,
+    target_path: []const u8,
+    tag: []const u8,
+    asset_name: []const u8,
+) ![]const u8 {
     const target = try shellQuote(allocator, target_path);
     defer allocator.free(target);
 
-    const tarball_url = try std.fmt.allocPrint(allocator, "https://github.com/codejunkie99/ztk/archive/refs/tags/{s}.tar.gz", .{tag});
-    defer allocator.free(tarball_url);
-    const tarball = try shellQuote(allocator, tarball_url);
-    defer allocator.free(tarball);
+    const asset_url = try std.fmt.allocPrint(allocator, "https://github.com/codejunkie99/ztk/releases/download/{s}/{s}", .{ tag, asset_name });
+    defer allocator.free(asset_url);
+    const asset = try shellQuote(allocator, asset_url);
+    defer allocator.free(asset);
 
     return try std.fmt.allocPrint(allocator,
         \\set -eu
         \\tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/ztk-update.XXXXXX")
         \\cleanup() {{ rm -rf "$tmp"; }}
         \\trap cleanup EXIT
-        \\curl -fsSL -o "$tmp/ztk.tar.gz" {s}
-        \\tar -xzf "$tmp/ztk.tar.gz" -C "$tmp"
-        \\cd "$tmp/ztk-{s}"
-        \\zig build -Doptimize=ReleaseSmall
+        \\curl -fsSL -o "$tmp/ztk-release.tar.gz" {s}
+        \\tar -xzf "$tmp/ztk-release.tar.gz" -C "$tmp"
         \\target={s}
         \\new_target="${{target}}.new.$$"
-        \\install -m 755 zig-out/bin/ztk "$new_target"
+        \\install -m 755 "$tmp/ztk" "$new_target"
         \\mv "$new_target" "$target"
         \\"$target" --version
         \\
-    , .{ tarball, version_dir, target });
+    , .{ asset, target });
+}
+
+fn releaseAssetName() ?[]const u8 {
+    return switch (builtin.os.tag) {
+        .macos => switch (builtin.cpu.arch) {
+            .aarch64 => "ztk-aarch64-macos.tar.gz",
+            .x86_64 => "ztk-x86_64-macos.tar.gz",
+            else => null,
+        },
+        .linux => switch (builtin.cpu.arch) {
+            .aarch64 => "ztk-aarch64-linux-musl.tar.gz",
+            .x86_64 => "ztk-x86_64-linux-musl.tar.gz",
+            else => null,
+        },
+        else => null,
+    };
 }
 
 fn shellQuote(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -221,12 +250,13 @@ test "shellQuote handles single quotes" {
     try std.testing.expectEqualStrings("'/tmp/ztk user'\\''s/bin/ztk'", quoted);
 }
 
-test "buildUpdateScript downloads release tarball and installs target binary" {
-    const script = try buildUpdateScript(std.testing.allocator, "/Users/me/.local/bin/ztk", "v0.2.3");
+test "buildUpdateScript downloads release binary and installs target binary" {
+    const script = try buildUpdateScriptForAsset(std.testing.allocator, "/Users/me/.local/bin/ztk", "v0.2.3", "ztk-aarch64-macos.tar.gz");
     defer std.testing.allocator.free(script);
 
-    try std.testing.expect(std.mem.indexOf(u8, script, "https://github.com/codejunkie99/ztk/archive/refs/tags/v0.2.3.tar.gz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, script, "cd \"$tmp/ztk-0.2.3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "https://github.com/codejunkie99/ztk/releases/download/v0.2.3/ztk-aarch64-macos.tar.gz") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "zig build") == null);
     try std.testing.expect(std.mem.indexOf(u8, script, "target='/Users/me/.local/bin/ztk'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "install -m 755 \"$tmp/ztk\" \"$new_target\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "mv \"$new_target\" \"$target\"") != null);
 }

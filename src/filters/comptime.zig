@@ -118,12 +118,52 @@ comptime {
 }
 
 /// Matches when `command` equals `spec` exactly OR when `command` starts with
-/// `spec` followed by a space. This lets `git log -10` match the `git log` spec
-/// while keeping `git logfoo` from matching.
-fn commandMatches(command: []const u8, spec: []const u8) bool {
+/// `spec` followed by whitespace. This lets `git log -10` match the `git log`
+/// spec while keeping `git logfoo` from matching.
+fn commandMatchesPlain(command: []const u8, spec: []const u8) bool {
     if (command.len < spec.len) return false;
     if (!std.mem.eql(u8, command[0..spec.len], spec)) return false;
-    return command.len == spec.len or command[spec.len] == ' ';
+    return command.len == spec.len or isArgBoundary(command[spec.len]);
+}
+
+fn commandMatches(command: []const u8, spec: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, command, " \t");
+    if (commandMatchesPlain(trimmed, spec)) return true;
+    return commandMatchesPathQualified(trimmed, spec);
+}
+
+fn commandMatchesPathQualified(command: []const u8, spec: []const u8) bool {
+    const cmd_head_end = firstTokenEnd(command);
+    const cmd_head = command[0..cmd_head_end];
+    const slash = std.mem.lastIndexOfScalar(u8, cmd_head, '/') orelse return false;
+    const cmd_base = cmd_head[slash + 1 ..];
+
+    const spec_head_end = firstTokenEnd(spec);
+    const spec_head = spec[0..spec_head_end];
+    if (!std.mem.eql(u8, cmd_base, spec_head)) return false;
+
+    const spec_rest = std.mem.trimStart(u8, spec[spec_head_end..], " \t");
+    if (spec_rest.len == 0) return true;
+
+    const cmd_rest = std.mem.trimStart(u8, command[cmd_head_end..], " \t");
+    return commandMatchesPlain(cmd_rest, spec_rest);
+}
+
+fn firstTokenEnd(bytes: []const u8) usize {
+    var i: usize = 0;
+    while (i < bytes.len and !isArgBoundary(bytes[i])) : (i += 1) {}
+    return i;
+}
+
+fn isArgBoundary(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+pub fn hasFilterForCommand(command: []const u8) bool {
+    inline for (specs) |s| {
+        if (commandMatches(command, s.command)) return true;
+    }
+    return false;
 }
 
 pub fn dispatch(command: []const u8, input: []const u8, alloc: std.mem.Allocator) ?FilterResult {
@@ -158,6 +198,22 @@ pub const spec_names: [specs.len][]const u8 = blk: {
 test "dispatch returns null for unknown or empty command" {
     try std.testing.expect(dispatch("nonexistent_xyz", "", std.testing.allocator) == null);
     try std.testing.expect(dispatch("", "", std.testing.allocator) == null);
+}
+
+test "dispatch matches path-qualified executables" {
+    const A = std.testing.allocator;
+
+    const ls = dispatch("/bin/ls -la", "a.zig\nb.zig\n", A) orelse return error.TestExpectedEqual;
+    defer A.free(ls.output);
+    try std.testing.expect(std.mem.indexOf(u8, ls.output, "a.zig") != null);
+
+    const find = dispatch("/usr/bin/find src -type f", "src/a.zig\nsrc/b.zig\n", A) orelse return error.TestExpectedEqual;
+    defer A.free(find.output);
+    try std.testing.expect(std.mem.indexOf(u8, find.output, "2 files in 1 dirs") != null);
+
+    try std.testing.expect(hasFilterForCommand("/opt/homebrew/bin/git status -s"));
+    try std.testing.expect(hasFilterForCommand("\t/usr/bin/rg reducer src"));
+    try std.testing.expect(!hasFilterForCommand("/tmp/git-status"));
 }
 
 test "dispatch covers phase 2 common developer loop commands" {

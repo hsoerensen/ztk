@@ -37,7 +37,21 @@ From a real 256-command development session:
 brew install codejunkie99/ztk/ztk
 ```
 
-Or build from source (requires Zig 0.16+):
+Or install a prebuilt binary from the latest release (no Zig required):
+
+```bash
+case "$(uname -m)-$(uname -s)" in
+  arm64-Darwin) asset=ztk-aarch64-macos.tar.gz ;;
+  x86_64-Darwin) asset=ztk-x86_64-macos.tar.gz ;;
+  aarch64-Linux) asset=ztk-aarch64-linux-musl.tar.gz ;;
+  x86_64-Linux) asset=ztk-x86_64-linux-musl.tar.gz ;;
+  *) echo "unsupported platform" >&2; exit 1 ;;
+esac
+curl -fsSL "https://github.com/codejunkie99/ztk/releases/latest/download/$asset" | tar -xz
+install -m 755 ztk ~/.local/bin/ztk
+```
+
+You can also build from source (requires Zig 0.16+):
 
 ```bash
 git clone https://github.com/codejunkie99/ztk
@@ -73,6 +87,27 @@ ztk update
 
 For Homebrew installs, use `brew upgrade codejunkie99/ztk/ztk`; `ztk update` will not overwrite a Homebrew-managed binary.
 
+## Claude Code Permissions
+
+Claude Code users who run in Auto mode should install the hook with:
+
+```bash
+ztk init -g --skip-permissions
+```
+
+That makes the ztk hook return `allow` for commands it rewrites, so Claude Code does not stop on every `ztk run ...` wrapper. Your `permissions.deny` and `permissions.ask` rules still apply to the rewritten command, so keep explicit rules for dangerous actions:
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(rm -rf*)", "Bash(git push --force*)"],
+    "ask": ["Bash(npm publish*)"]
+  }
+}
+```
+
+If you already installed `ztk rewrite` without the flag, remove the old ztk `PreToolUse` hook entry from `.claude/settings.json`, then run `ztk init -g --skip-permissions` again.
+
 ## How It Works
 
 ```
@@ -85,6 +120,8 @@ For Homebrew installs, use `brew upgrade codejunkie99/ztk/ztk`; `ztk update` wil
 ```
 
 ztk runs the command normally, captures the output, compresses it through a six-stage pipeline, and hands back the compressed version. The AI gets the same information in a fraction of the space.
+
+The hook matcher also recognizes path-qualified executables such as `/bin/ls`, `/usr/bin/find`, and `/opt/homebrew/bin/git status`, so agents do not bypass compression by spelling the same tool with an absolute path.
 
 **What gets compressed:**
 - Diff metadata and excess context lines → just the changes
@@ -137,7 +174,7 @@ Mutation commands like `git add` automatically invalidate related caches.
 
 **SIMD text processing.** Line splitting and ANSI escape stripping use `@Vector(16, u8)` for hardware-accelerated processing on both ARM NEON and x86 SSE2.
 
-**269 tests.** Every filter, every edge case, every state machine. The regex engine alone has 11 tests covering catastrophic backtracking prevention.
+**270+ tests.** Every filter, every edge case, every state machine. The regex engine alone has 11 tests covering catastrophic backtracking prevention.
 
 ## Supported Agents
 
@@ -153,9 +190,9 @@ Mutation commands like `git add` automatically invalidate related caches.
 
 ```bash
 zig build              # Build
-zig build test         # Run 231 tests
+zig build test         # Run unit tests
 zig build run -- stats # Run with args
-zig build cross        # Cross-compile to 4 targets
+zig build cross        # Cross-compile release binaries
 ```
 
 ## License
