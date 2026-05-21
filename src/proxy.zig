@@ -17,21 +17,21 @@ pub fn runProxy(cmd_args: []const []const u8, allocator: std.mem.Allocator) !u8 
     if (rawEnvEnabled(allocator)) return runCommandRaw(cmd_args, allocator);
 
     const result = try executor.exec(cmd_args, allocator, .filter_stdout_only);
-    const filtered = applyFilters(cmd_str, result.stdout, allocator);
-    const final_bytes = maybeApplySession(cmd_str, filtered, allocator);
+    const processed = processOutput(cmd_str, result, allocator);
     if (!builtin.is_test) {
         const log_path = resolveLogPath(allocator) catch null;
         defer if (log_path) |p| allocator.free(p);
         output.emitWithCommand(
-            final_bytes,
+            processed.stdout,
             .{
                 .command = cmd_args[0],
                 .original = result.stdout.len,
-                .filtered = final_bytes.len,
+                .filtered = processed.stdout.len,
                 .exit_code = result.exit_code,
             },
             log_path,
         ) catch {};
+        if (processed.stderr.len > 0) compat.writeStderr(processed.stderr) catch {};
     }
     return result.exit_code;
 }
@@ -93,6 +93,20 @@ const FilteredOutput = struct {
     matched: bool,
 };
 
+const ProcessedOutput = struct {
+    stdout: []const u8,
+    stderr: []const u8,
+};
+
+fn processOutput(cmd: []const u8, result: executor.ExecResult, allocator: std.mem.Allocator) ProcessedOutput {
+    const filtered = applyFilters(cmd, result.stdout, allocator);
+    const final_bytes = maybeApplySession(cmd, filtered, allocator);
+    return .{
+        .stdout = final_bytes,
+        .stderr = result.stderr,
+    };
+}
+
 fn applyFilters(cmd: []const u8, stdout_bytes: []const u8, allocator: std.mem.Allocator) FilteredOutput {
     if (comptime_filters.dispatch(cmd, stdout_bytes, allocator)) |fr| {
         return .{ .bytes = fr.output, .stateful = fr.stateful, .category = fr.category, .matched = true };
@@ -123,4 +137,43 @@ test "runProxy preserves nonzero exit code" {
     defer arena.deinit();
     const code = try runProxy(&.{ "sh", "-c", "exit 42" }, arena.allocator());
     try std.testing.expectEqual(@as(u8, 42), code);
+}
+
+test "processOutput forwards stderr verbatim on nonzero exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const exec_result: executor.ExecResult = .{
+        .stdout = "",
+        .stderr = "ERROR: Coverage for branches (96.76%) does not meet global threshold (97%)\nerror: failed to push some refs to 'github.com:foo/bar.git'\n",
+        .exit_code = 1,
+    };
+    const processed = processOutput("git push", exec_result, arena.allocator());
+    try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
+}
+
+test "processOutput forwards stderr verbatim on zero exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const exec_result: executor.ExecResult = .{
+        .stdout = "To github.com:user/repo\n   abc..def  main -> main\n",
+        .stderr = "progress noise\n",
+        .exit_code = 0,
+    };
+    const processed = processOutput("git push", exec_result, arena.allocator());
+    try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "ok") != null);
+}
+
+test "processOutput keeps stdout filter masking sensitive values on nonzero exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const exec_result: executor.ExecResult = .{
+        .stdout = "API_KEY=topsecret\nPATH=/usr/bin\n",
+        .stderr = "command failed\n",
+        .exit_code = 1,
+    };
+    const processed = processOutput("env", exec_result, arena.allocator());
+    try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "<masked>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "topsecret") == null);
+    try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
 }
