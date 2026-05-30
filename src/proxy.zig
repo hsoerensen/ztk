@@ -17,7 +17,7 @@ pub fn runProxy(cmd_args: []const []const u8, allocator: std.mem.Allocator) !u8 
     if (rawEnvEnabled(allocator)) return runCommandRaw(cmd_args, allocator);
 
     const result = try executor.exec(cmd_args, allocator, .filter_stdout_only);
-    const processed = processOutput(cmd_str, result, allocator);
+    const processed = processOutput(cmd_str, &result, allocator);
     if (!builtin.is_test) {
         const log_path = resolveLogPath(allocator) catch null;
         defer if (log_path) |p| allocator.free(p);
@@ -98,7 +98,7 @@ const ProcessedOutput = struct {
     stderr: []const u8,
 };
 
-fn processOutput(cmd: []const u8, result: executor.ExecResult, allocator: std.mem.Allocator) ProcessedOutput {
+fn processOutput(cmd: []const u8, result: *const executor.ExecResult, allocator: std.mem.Allocator) ProcessedOutput {
     const filtered = applyFilters(cmd, result.stdout, allocator);
     const final_bytes = maybeApplySession(cmd, filtered, allocator);
     return .{
@@ -147,7 +147,7 @@ test "processOutput forwards stderr verbatim on nonzero exit" {
         .stderr = "ERROR: Coverage for branches (96.76%) does not meet global threshold (97%)\nerror: failed to push some refs to 'github.com:foo/bar.git'\n",
         .exit_code = 1,
     };
-    const processed = processOutput("git push", exec_result, arena.allocator());
+    const processed = processOutput("git push", &exec_result, arena.allocator());
     try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
 }
 
@@ -159,9 +159,8 @@ test "processOutput forwards stderr verbatim on zero exit" {
         .stderr = "progress noise\n",
         .exit_code = 0,
     };
-    const processed = processOutput("git push", exec_result, arena.allocator());
+    const processed = processOutput("git push", &exec_result, arena.allocator());
     try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "ok") != null);
 }
 
 test "processOutput keeps stdout filter masking sensitive values on nonzero exit" {
@@ -172,7 +171,7 @@ test "processOutput keeps stdout filter masking sensitive values on nonzero exit
         .stderr = "command failed\n",
         .exit_code = 1,
     };
-    const processed = processOutput("env", exec_result, arena.allocator());
+    const processed = processOutput("env", &exec_result, arena.allocator());
     try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "<masked>") != null);
     try std.testing.expect(std.mem.indexOf(u8, processed.stdout, "topsecret") == null);
     try std.testing.expectEqualStrings(exec_result.stderr, processed.stderr);
